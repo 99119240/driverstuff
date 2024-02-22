@@ -1,0 +1,132 @@
+#include <ntddk.h>
+
+extern "C" NTSTATUS
+DriverEntry(
+    _In_ PDRIVER_OBJECT   DriverObject,
+    _In_ PUNICODE_STRING  RegistryPath
+);
+
+extern "C" VOID UnloadDriver(
+    _In_ PDRIVER_OBJECT DriverObject
+);
+
+extern "C" VOID FindPidByName(
+    _In_ PCWSTR procName
+);
+
+extern "C" NTSTATUS ReadMemoryWithOffsets(
+    _In_ HANDLE ProcessId,
+    _In_ PVOID BaseAddress,
+    _In_reads_(OffsetCount) ULONG Offsets[],
+    _In_ ULONG OffsetCount,
+    _Out_ PVOID Buffer,
+    _In_ SIZE_T Size
+);
+
+NTSTATUS
+DriverEntry(
+    _In_ PDRIVER_OBJECT   DriverObject,
+    _In_ PUNICODE_STRING  RegistryPath
+)
+{
+    UNREFERENCED_PARAMETER(RegistryPath);
+
+    DriverObject->DriverUnload = UnloadDriver;
+
+    // Find PID by name
+    FindPidByName(L"target_process_name");
+
+    return STATUS_SUCCESS;
+}
+
+VOID
+UnloadDriver(
+    _In_ PDRIVER_OBJECT DriverObject
+)
+{
+    UNREFERENCED_PARAMETER(DriverObject);
+
+    KdPrint(("Driver Unloaded\n"));
+}
+
+VOID
+FindPidByName(
+    _In_ PCWSTR procName
+)
+{
+    PEPROCESS process;
+    UNICODE_STRING targetName;
+
+    RtlInitUnicodeString(&targetName, procName);
+
+    if (NT_SUCCESS(PsLookupProcessByProcessId(PsGetCurrentProcessId(), &process))) {
+        if (RtlEqualUnicodeString(&targetName, &PsGetProcessImageFileName(process), TRUE)) {
+            KdPrint(("Found process %wZ with PID %d\n", &targetName, PsGetProcessId(process)));
+
+            // Define offsets for the memory address you want to read
+            ULONG offsets[] = { 0x10, 0x20, 0x30 };
+
+            // Example of reading memory with offsets
+            PVOID buffer;
+            SIZE_T bufferSize = sizeof(buffer);
+            NTSTATUS status = ReadMemoryWithOffsets(PsGetProcessId(process), (PVOID)0xAddress, offsets, ARRAYSIZE(offsets), &buffer, bufferSize);
+
+            if (NT_SUCCESS(status)) {
+                KdPrint(("Read data from memory: %p\n", buffer));
+                // Process the data as needed
+            } else {
+                KdPrint(("Failed to read memory with status 0x%X\n", status));
+            }
+
+            // Perform further operations with the found PID here
+            ExFreePool(buffer);
+        }
+
+        ObDereferenceObject(process);
+    }
+}
+
+NTSTATUS
+ReadMemoryWithOffsets(
+    _In_ HANDLE ProcessId,
+    _In_ PVOID BaseAddress,
+    _In_reads_(OffsetCount) ULONG Offsets[],
+    _In_ ULONG OffsetCount,
+    _Out_ PVOID Buffer,
+    _In_ SIZE_T Size
+)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PEPROCESS process = nullptr;
+    KAPC_STATE apcState;
+
+    __try {
+        status = PsLookupProcessByProcessId(ProcessId, &process);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+
+        KeStackAttachProcess(process, &apcState);
+
+        // Calculate the final address with offsets
+        PVOID finalAddress = (PVOID)((ULONG_PTR)BaseAddress + Offsets[0]);
+
+        for (ULONG i = 1; i < OffsetCount; ++i) {
+            finalAddress = (PVOID)((ULONG_PTR)*(PULONG_PTR)finalAddress + Offsets[i]);
+        }
+
+        // Read memory
+        status = MmCopyMemory(Buffer, finalAddress, Size, MM_COPY_MEMORY_VIRTUAL, nullptr);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        status = GetExceptionCode();
+    }
+    __finally {
+        if (process != nullptr) {
+            KeUnstackDetachProcess(&apcState);
+            ObDereferenceObject(process);
+        }
+    }
+
+    return status;
+}
